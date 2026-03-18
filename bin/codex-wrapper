@@ -113,7 +113,7 @@ probe_key() {
     local output
     output=$(CODEX_HOME="$dir" timeout 15 "$CODEX_BIN" exec \
         --json --ephemeral \
-        -m o4-mini -c 'model_reasoning_effort="low"' \
+        -m gpt-5.4 -c 'model_reasoning_effort="low"' \
         "reply with only: ok" 2>/dev/null)
 
     local failed_msg
