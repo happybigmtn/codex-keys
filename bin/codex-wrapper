@@ -314,8 +314,8 @@ pick_key() {
             fi
         fi
 
-        entries+=($(printf '%-14s ...%s  %-8s %-8s %s' \
-            "$label" "$suffix" "$five_h" "$weekly" "$resets"))
+        entries+=("$(printf '%-14s ...%s  %-8s %-8s %s' \
+            "$label" "$suffix" "$five_h" "$weekly" "$resets")")
         homes+=("$dir")
     done
 
