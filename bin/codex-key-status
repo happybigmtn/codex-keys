@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+#
+# Show status of all Codex key slots
+#
+set -euo pipefail
+
+KEYS_DIR="${CODEX_KEYS_DIR:-$HOME/.codex-keys}"
+CACHE_DIR="$KEYS_DIR/.cache"
+
+if [[ ! -d "$KEYS_DIR" ]]; then
+    echo "No keys directory at $KEYS_DIR"
+    echo "Run 'codex-key-add <label>' to create one"
+    exit 1
+fi
+
+format_countdown() {
+    local diff="$1"
+    if [[ "$diff" -le 0 ]]; then
+        echo "now"
+    elif [[ "$diff" -lt 3600 ]]; then
+        awk "BEGIN { printf \"%dm\", $diff/60 }"
+    elif [[ "$diff" -lt 86400 ]]; then
+        awk "BEGIN { h=int($diff/3600); m=int(($diff%3600)/60)
+                     printf \"%dh%02dm\", h, m }"
+    else
+        awk "BEGIN { d=int($diff/86400); h=int(($diff%86400)/3600)
+                     printf \"%dd%dh\", d, h }"
+    fi
+}
+
+now=$(date +%s)
+
+printf "%-14s %-10s %-10s %-10s %s\n" \
+    "KEY" "STATUS" "5H" "WEEKLY" "RESETS"
+printf "%-14s %-10s %-10s %-10s %s\n" \
+    "---" "------" "--" "------" "------"
+
+for dir in "$KEYS_DIR"/*/; do
+    [[ -d "$dir" && -f "$dir/auth.json" ]] || continue
+    slot="$(basename "$dir")"
+    label="$slot"
+    [[ -f "$dir/label" ]] && label="$(cat "$dir/label")"
+
+    cache_file="$CACHE_DIR/$slot.json"
+    status="?" five_h="?" weekly="?" resets="?"
+
+    if [[ -f "$cache_file" ]]; then
+        status=$(jq -r '.status' "$cache_file")
+        five_r=$(jq -r '.five_h_resets // 0' "$cache_file")
+        weekly_r=$(jq -r '.weekly_resets // 0' "$cache_file")
+        cache_age=$(( now - $(jq -r '.probed_at // 0' "$cache_file") ))
+
+        case "$status" in
+            ok)
+                five_h="ok"; weekly="ok"; resets="available"
+                ;;
+            limited)
+                if [[ "$five_r" -gt 0 && "$five_r" -gt "$now" ]]; then
+                    five_h=$(format_countdown $((five_r - now)))
+                elif [[ "$five_r" -gt 0 ]]; then
+                    five_h="ok?"
+                else
+                    five_h="LIMIT"
+                fi
+                if [[ "$weekly_r" -gt 0 && "$weekly_r" -gt "$now" ]]; then
+                    weekly=$(format_countdown $((weekly_r - now)))
+                    resets=$(format_countdown $((weekly_r - now)))
+                elif [[ "$weekly_r" -gt 0 ]]; then
+                    weekly="ok?"
+                    resets="ok?"
+                else
+                    weekly="?"
+                    resets="$five_h"
+                fi
+                ;;
+            error)
+                five_h="ERR"; weekly="ERR"; resets="error"
+                ;;
+        esac
+
+        if [[ "$cache_age" -gt 300 ]]; then
+            status="${status}*"
+        fi
+    fi
+
+    printf "%-14s %-10s %-10s %-10s %s\n" \
+        "$label" "$status" "$five_h" "$weekly" "$resets"
+done
+
+echo ""
+echo "* = cache stale (>5m). Run 'codex' to refresh."
