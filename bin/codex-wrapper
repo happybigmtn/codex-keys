@@ -150,37 +150,61 @@ probe_key() {
     fi
 }
 
+# ── Countdown formatter ──
+
+format_countdown() {
+    local diff="$1"
+    if [[ "$diff" -le 0 ]]; then echo "now"
+    elif [[ "$diff" -lt 3600 ]]; then
+        awk "BEGIN { printf \"%dm\", $diff/60 }"
+    elif [[ "$diff" -lt 86400 ]]; then
+        awk "BEGIN { h=int($diff/3600); m=int(($diff%3600)/60)
+                     printf \"%dh%02dm\", h, m }"
+    else
+        awk "BEGIN { d=int($diff/86400); h=int(($diff%86400)/3600)
+                     printf \"%dd%dh\", d, h }"
+    fi
+}
+
+# ── Probe & collect slots ──
+
+load_slots() {
+    SLOT_DIRS=()
+    SLOT_NAMES=()
+    for dir in "$KEYS_DIR"/*/; do
+        [[ -d "$dir" && -f "$dir/auth.json" ]] || continue
+        SLOT_DIRS+=("$dir")
+        SLOT_NAMES+=("$(basename "$dir")")
+    done
+}
+
+probe_all_slots() {
+    mkdir -p "$CACHE_DIR"
+    local -a pids=()
+    for i in "${!SLOT_DIRS[@]}"; do
+        probe_key "${SLOT_DIRS[$i]}" "${SLOT_NAMES[$i]}" &
+        pids+=($!)
+    done
+    for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+}
+
 # ── Auto-select best key ──
 
 auto_select_key() {
-    local -a slot_dirs=() slot_names=()
-    for dir in "$KEYS_DIR"/*/; do
-        [[ -d "$dir" && -f "$dir/auth.json" ]] || continue
-        slot_dirs+=("$dir")
-        slot_names+=("$(basename "$dir")")
-    done
-
-    [[ ${#slot_dirs[@]} -eq 0 ]] && return 1
-    if [[ ${#slot_dirs[@]} -eq 1 ]]; then
-        echo "${slot_dirs[0]}"
+    load_slots
+    [[ ${#SLOT_DIRS[@]} -eq 0 ]] && return 1
+    if [[ ${#SLOT_DIRS[@]} -eq 1 ]]; then
+        echo "${SLOT_DIRS[0]}"
         return 0
     fi
 
-    mkdir -p "$CACHE_DIR"
-    local -a pids=()
-    for i in "${!slot_dirs[@]}"; do
-        probe_key "${slot_dirs[$i]}" "${slot_names[$i]}" &
-        pids+=($!)
-    done
-    for pid in "${pids[@]}"; do
-        wait "$pid" 2>/dev/null || true
-    done
+    probe_all_slots
 
     local now best_dir="" best_score=-1 best_reset=999999999
     now=$(date +%s)
 
-    for i in "${!slot_dirs[@]}"; do
-        local cache_file="$CACHE_DIR/${slot_names[$i]}.json"
+    for i in "${!SLOT_DIRS[@]}"; do
+        local cache_file="$CACHE_DIR/${SLOT_NAMES[$i]}.json"
         local score=0 reset=999999999
 
         if [[ -f "$cache_file" ]]; then
@@ -223,7 +247,7 @@ auto_select_key() {
         if [[ "$score" -gt "$best_score" ]] || \
            { [[ "$score" -eq "$best_score" ]] \
              && [[ "$reset" -lt "$best_reset" ]]; }; then
-            best_dir="${slot_dirs[$i]}"
+            best_dir="${SLOT_DIRS[$i]}"
             best_score="$score"
             best_reset="$reset"
         fi
@@ -232,9 +256,107 @@ auto_select_key() {
     [[ -n "$best_dir" ]] && echo "$best_dir"
 }
 
+# ── Interactive picker (--pick) ──
+
+pick_key() {
+    load_slots
+    [[ ${#SLOT_DIRS[@]} -eq 0 ]] && return 1
+    if [[ ${#SLOT_DIRS[@]} -eq 1 ]]; then
+        echo "${SLOT_DIRS[0]}"
+        return 0
+    fi
+
+    probe_all_slots
+
+    local -a entries=() homes=()
+    local now
+    now=$(date +%s)
+
+    for i in "${!SLOT_DIRS[@]}"; do
+        local dir="${SLOT_DIRS[$i]}"
+        local slot="${SLOT_NAMES[$i]}"
+        local label="$slot"
+        [[ -f "$dir/label" ]] && label="$(cat "$dir/label")"
+        local suffix
+        suffix=$(jq -r '.tokens.account_id // "unknown"' \
+            "$dir/auth.json" 2>/dev/null | tail -c 7)
+
+        local cache_file="$CACHE_DIR/$slot.json"
+        local status="?" five_h="?" weekly="?" resets="?"
+
+        if [[ -f "$cache_file" ]]; then
+            status=$(jq -r '.status' "$cache_file")
+            local five_r weekly_r
+            five_r=$(jq -r '.five_h_resets // 0' "$cache_file")
+            weekly_r=$(jq -r '.weekly_resets // 0' "$cache_file")
+
+            if [[ "$status" == "ok" ]]; then
+                five_h="ok"; weekly="ok"; resets="available"
+            elif [[ "$status" == "limited" ]]; then
+                if [[ "$five_r" -gt 0 && "$five_r" -gt "$now" ]]; then
+                    five_h=$(format_countdown $((five_r - now)))
+                else
+                    five_h="LIMIT"
+                fi
+                if [[ "$weekly_r" -gt 0 \
+                   && "$weekly_r" -gt "$now" ]]; then
+                    weekly=$(format_countdown $((weekly_r - now)))
+                    resets=$(format_countdown $((weekly_r - now)))
+                elif [[ "$five_r" -gt 0 \
+                     && "$five_r" -gt "$now" ]]; then
+                    weekly="?"
+                    resets=$(format_countdown $((five_r - now)))
+                else
+                    weekly="LIMIT"; resets="limited"
+                fi
+            else
+                five_h="ERR"; weekly="ERR"; resets="error"
+            fi
+        fi
+
+        entries+=($(printf '%-14s ...%s  %-8s %-8s %s' \
+            "$label" "$suffix" "$five_h" "$weekly" "$resets"))
+        homes+=("$dir")
+    done
+
+    local selection
+    selection=$(printf '%s\n' "${entries[@]}" | fzf \
+        --height=~$((${#entries[@]} + 3)) \
+        --layout=reverse \
+        --prompt="codex key> " \
+        --header="KEY            ACCOUNT   5H       WEEKLY   RESETS" \
+        --no-info \
+        --cycle)
+
+    [[ -z "$selection" ]] && return 1
+
+    for i in "${!entries[@]}"; do
+        if [[ "${entries[$i]}" == "$selection" ]]; then
+            echo "${homes[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── Main ──
 
-chosen=$(auto_select_key) && export CODEX_HOME="$chosen"
+SHOW_PICKER=0
+args=()
+for arg in "$@"; do
+    if [[ "$arg" == "--pick" ]]; then
+        SHOW_PICKER=1
+    else
+        args+=("$arg")
+    fi
+done
+
+if [[ "$SHOW_PICKER" -eq 1 && -t 0 && -t 1 ]]; then
+    chosen=$(pick_key) && export CODEX_HOME="$chosen"
+else
+    chosen=$(auto_select_key) && export CODEX_HOME="$chosen"
+fi
+
 export CODEX_HOME="${CODEX_HOME:-$DEFAULT_HOME}"
 
-"$CODEX_BIN" "$@"
+"$CODEX_BIN" "${args[@]}"
