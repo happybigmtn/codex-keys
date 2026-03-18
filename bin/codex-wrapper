@@ -97,6 +97,7 @@ classify_window() {
 }
 
 probe_key() {
+    trap - EXIT
     local dir="$1" slot_name="$2"
     local cache_file="$CACHE_DIR/$slot_name.json"
     local now
